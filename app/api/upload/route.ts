@@ -3,6 +3,8 @@ import { mkdir, writeFile } from "fs/promises";
 import path from "path";
 import db from "@/lib/db";
 
+const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 Mo
+
 export async function POST(request: Request) {
   try {
     const formData = await request.formData();
@@ -12,23 +14,49 @@ export async function POST(request: Request) {
 
     if (!file) {
       return NextResponse.json(
-        { error: "Aucun fichier reçu" },
+        {
+          success: false,
+          error: "Aucun fichier reçu",
+        },
         { status: 400 }
       );
     }
 
     if (file.type !== "application/pdf") {
       return NextResponse.json(
-        { error: "Seuls les fichiers PDF sont autorisés" },
+        {
+          success: false,
+          error: "Seuls les fichiers PDF sont autorisés",
+        },
         { status: 400 }
+      );
+    }
+
+    if (file.size === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Le fichier est vide",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Le fichier dépasse la taille maximale de 25 Mo",
+        },
+        { status: 413 }
       );
     }
 
     if (!dossierIdValue) {
       return NextResponse.json(
         {
-          error:
-            "Un dossier doit être sélectionné avant l'envoi du document",
+          success: false,
+          error: "Un dossier doit être sélectionné",
         },
         { status: 400 }
       );
@@ -38,7 +66,10 @@ export async function POST(request: Request) {
 
     if (!Number.isInteger(dossierId) || dossierId <= 0) {
       return NextResponse.json(
-        { error: "dossier_id invalide" },
+        {
+          success: false,
+          error: "dossier_id invalide",
+        },
         { status: 400 }
       );
     }
@@ -69,25 +100,74 @@ export async function POST(request: Request) {
 
     if (!dossier) {
       return NextResponse.json(
-        { error: "Dossier introuvable" },
+        {
+          success: false,
+          error: "Dossier introuvable",
+        },
         { status: 404 }
+      );
+    }
+
+    /*
+     * Vérification supplémentaire de l'extension.
+     * Le MIME envoyé par le navigateur ne suffit pas à lui seul.
+     */
+
+    const originalName = file.name.trim();
+
+    if (
+      !originalName.toLowerCase().endsWith(".pdf")
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Le fichier doit avoir une extension .pdf",
+        },
+        { status: 400 }
       );
     }
 
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    const uploadDir = path.join(process.cwd(), "uploads");
+    /*
+     * Vérification de la signature PDF.
+     * Un vrai PDF commence normalement par %PDF-
+     */
 
-    await mkdir(uploadDir, { recursive: true });
+    const pdfHeader = buffer
+      .subarray(0, 5)
+      .toString("ascii");
 
-    const safeName = file.name.replace(
+    if (pdfHeader !== "%PDF-") {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Le fichier fourni n'est pas un PDF valide",
+        },
+        { status: 400 }
+      );
+    }
+
+    const uploadDir = path.join(
+      process.cwd(),
+      "uploads"
+    );
+
+    await mkdir(uploadDir, {
+      recursive: true,
+    });
+
+    const safeName = originalName.replace(
       /[^a-zA-Z0-9._-]/g,
       "_"
     );
 
     const fileName = `${Date.now()}-${safeName}`;
-    const filePath = path.join(uploadDir, fileName);
+    const filePath = path.join(
+      uploadDir,
+      fileName
+    );
 
     await writeFile(filePath, buffer);
 
@@ -109,9 +189,9 @@ export async function POST(request: Request) {
       .run(
         dossierId,
         fileName,
-        file.name,
+        originalName,
         filePath,
-        file.type,
+        "application/pdf",
         buffer.length,
         "uploaded"
       );
@@ -120,27 +200,29 @@ export async function POST(request: Request) {
       documentResult.lastInsertRowid
     );
 
-    return NextResponse.json({
-      success: true,
-      documentId,
-      fileName,
-      dossierId,
-      dossierName: dossier.name,
-      clientId: dossier.client_id,
-      clientName: dossier.client_name,
-      status: "uploaded",
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        documentId,
+        fileName,
+        dossierId,
+        dossierName: dossier.name,
+        clientId: dossier.client_id,
+        clientName: dossier.client_name,
+        status: "uploaded",
+      },
+      { status: 201 }
+    );
   } catch (error) {
-    console.error("ERREUR UPLOAD :", error);
+    console.error(
+      "ERREUR UPLOAD :",
+      error
+    );
 
     return NextResponse.json(
       {
         success: false,
         error: "Erreur lors de l'upload",
-        details:
-          error instanceof Error
-            ? error.message
-            : String(error),
       },
       { status: 500 }
     );
