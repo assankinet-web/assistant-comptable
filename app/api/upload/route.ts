@@ -24,6 +24,56 @@ export async function POST(request: Request) {
       );
     }
 
+    if (!dossierIdValue) {
+      return NextResponse.json(
+        {
+          error:
+            "Un dossier doit être sélectionné avant l'envoi du document",
+        },
+        { status: 400 }
+      );
+    }
+
+    const dossierId = Number(dossierIdValue);
+
+    if (!Number.isInteger(dossierId) || dossierId <= 0) {
+      return NextResponse.json(
+        { error: "dossier_id invalide" },
+        { status: 400 }
+      );
+    }
+
+    const dossier = db
+      .prepare(
+        `
+        SELECT
+          dossiers.id,
+          dossiers.name,
+          dossiers.client_id,
+          clients.name AS client_name
+        FROM dossiers
+        INNER JOIN clients
+          ON clients.id = dossiers.client_id
+        WHERE dossiers.id = ?
+        LIMIT 1
+        `
+      )
+      .get(dossierId) as
+      | {
+          id: number;
+          name: string;
+          client_id: number;
+          client_name: string;
+        }
+      | undefined;
+
+    if (!dossier) {
+      return NextResponse.json(
+        { error: "Dossier introuvable" },
+        { status: 404 }
+      );
+    }
+
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
@@ -31,98 +81,19 @@ export async function POST(request: Request) {
 
     await mkdir(uploadDir, { recursive: true });
 
-    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const safeName = file.name.replace(
+      /[^a-zA-Z0-9._-]/g,
+      "_"
+    );
+
     const fileName = `${Date.now()}-${safeName}`;
     const filePath = path.join(uploadDir, fileName);
 
     await writeFile(filePath, buffer);
 
-    let dossierId: number;
-
-    if (dossierIdValue) {
-      dossierId = Number(dossierIdValue);
-
-      if (!Number.isInteger(dossierId) || dossierId <= 0) {
-        return NextResponse.json(
-          { error: "dossier_id invalide" },
-          { status: 400 }
-        );
-      }
-
-      const dossier = db
-        .prepare(`
-          SELECT id
-          FROM dossiers
-          WHERE id = ?
-        `)
-        .get(dossierId);
-
-      if (!dossier) {
-        return NextResponse.json(
-          { error: "Dossier introuvable" },
-          { status: 404 }
-        );
-      }
-    } else {
-      // Compatibilité temporaire avec l'ancien MVP.
-      let client = db
-        .prepare(`
-          SELECT id
-          FROM clients
-          WHERE name = ?
-          LIMIT 1
-        `)
-        .get("Entreprise Exemple") as { id: number } | undefined;
-
-      if (!client) {
-        const result = db
-          .prepare(`
-            INSERT INTO clients (name)
-            VALUES (?)
-          `)
-          .run("Entreprise Exemple");
-
-        client = {
-          id: Number(result.lastInsertRowid),
-        };
-      }
-
-      let dossier = db
-        .prepare(`
-          SELECT id
-          FROM dossiers
-          WHERE client_id = ?
-          AND fiscal_year = ?
-          LIMIT 1
-        `)
-        .get(client.id, 2026) as { id: number } | undefined;
-
-      if (!dossier) {
-        const result = db
-          .prepare(`
-            INSERT INTO dossiers (
-              client_id,
-              name,
-              fiscal_year
-            )
-            VALUES (?, ?, ?)
-          `)
-          .run(
-            client.id,
-            "Exercice 2026",
-            2026
-          );
-
-        dossier = {
-          id: Number(result.lastInsertRowid),
-        };
-      }
-
-      dossierId = dossier.id;
-    }
-
     const documentResult = db
-      .prepare(`
+      .prepare(
+        `
         INSERT INTO documents (
           dossier_id,
           file_name,
@@ -133,7 +104,8 @@ export async function POST(request: Request) {
           status
         )
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `)
+        `
+      )
       .run(
         dossierId,
         fileName,
@@ -144,18 +116,31 @@ export async function POST(request: Request) {
         "uploaded"
       );
 
+    const documentId = Number(
+      documentResult.lastInsertRowid
+    );
+
     return NextResponse.json({
       success: true,
+      documentId,
       fileName,
-      documentId: Number(documentResult.lastInsertRowid),
       dossierId,
+      dossierName: dossier.name,
+      clientId: dossier.client_id,
+      clientName: dossier.client_name,
+      status: "uploaded",
     });
   } catch (error) {
     console.error("ERREUR UPLOAD :", error);
 
     return NextResponse.json(
       {
+        success: false,
         error: "Erreur lors de l'upload",
+        details:
+          error instanceof Error
+            ? error.message
+            : String(error),
       },
       { status: 500 }
     );
