@@ -1,8 +1,26 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f6f8f6;
+  --foreground: #1b241e;
+  --surface: #ffffff;
+  --surface-soft: #f2f7f3;
+
+  --brand-900: #1f3329;
+  --brand-800: #243a2e;
+  --brand-700: #2c4a3b;
+  --brand-500: #5e7c6a;
+  --brand-300: #b8d8c1;
+
+  --border: #dee7e0;
+  --border-soft: #edf2ee;
+
+  --text: #152018;
+  --text-secondary: #3e5a48;
+  --text-muted: #7a9686;
+
+  --success: #39734d;
+  --error: #8a3a3a;
 }
 
 @theme inline {
@@ -12,15 +30,85 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  background: var(--background);
 }
 
 body {
+  min-height: 100%;
+  margin: 0;
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+::selection {
+  background: #cfe3d4;
+  color: #1b241e;
+}
+
+:focus-visible {
+  outline: 2px solid #7fa88b;
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f2;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c5d3c9;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #aabdb0;
+}
+
+::placeholder {
+  color: #a9beb1;
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  button,
+  input,
+  select,
+  textarea,
+  a {
+    transition:
+      background-color 180ms ease-out,
+      border-color 180ms ease-out,
+      color 180ms ease-out,
+      opacity 180ms ease-out,
+      box-shadow 180ms ease-out,
+      transform 180ms ease-out;
+  }
 }

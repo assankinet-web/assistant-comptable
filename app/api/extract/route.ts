@@ -1,44 +1,22 @@
 import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import path from "path";
-import { access } from "fs/promises";
 import db from "@/lib/db";
-
-const PYTHON_PATH =
-  "/home/kinetassan/assistant-comptable-python/bin/python";
-
-const MAX_EXTRACTION_TIME = 120_000;
-
-type DocumentRow = {
-  id: number;
-  file_name: string;
-  original_name: string;
-  file_path: string;
-  status: string;
-};
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
+    const fileName = body.fileName;
 
-    const documentId = Number(body.documentId);
-
-    if (
-      !Number.isInteger(documentId) ||
-      documentId <= 0
-    ) {
+    if (!fileName || typeof fileName !== "string") {
       return NextResponse.json(
-        {
-          success: false,
-          error: "documentId invalide",
-        },
+        { error: "Nom de fichier manquant" },
         { status: 400 }
       );
     }
 
     const document = db
-      .prepare(
-        `
+      .prepare(`
         SELECT
           id,
           file_name,
@@ -46,85 +24,34 @@ export async function POST(request: Request) {
           file_path,
           status
         FROM documents
-        WHERE id = ?
+        WHERE file_name = ?
         LIMIT 1
-        `
-      )
-      .get(documentId) as
-      | DocumentRow
+      `)
+      .get(fileName) as
+      | {
+          id: number;
+          file_name: string;
+          original_name: string;
+          file_path: string;
+          status: string;
+        }
       | undefined;
 
     if (!document) {
       return NextResponse.json(
-        {
-          success: false,
-          error: "Document introuvable",
-        },
+        { error: "Document introuvable dans la base de données" },
         { status: 404 }
       );
     }
-
-    /*
-     * Le chemin est reconstruit depuis le nom enregistré
-     * en base afin d'éviter toute tentative d'accès
-     * à un fichier arbitraire.
-     */
-
-    const safeName = path.basename(
-      document.file_name
-    );
 
     const filePath = path.join(
       process.cwd(),
       "uploads",
-      safeName
+      path.basename(document.file_path)
     );
 
-    if (safeName !== document.file_name) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Nom de fichier invalide",
-        },
-        { status: 400 }
-      );
-    }
-
-    try {
-      await access(filePath);
-    } catch {
-      db.prepare(
-        `
-        UPDATE documents
-        SET status = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        `
-      ).run("error", document.id);
-
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Fichier PDF introuvable sur le serveur",
-        },
-        { status: 404 }
-      );
-    }
-
-    /*
-     * Si le document est déjà extrait, on peut
-     * refaire l'extraction volontairement.
-     * Les anciennes pages/chunks seront remplacées.
-     */
-
-    db.prepare(
-      `
-      UPDATE documents
-      SET status = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-      `
-    ).run("extracting", document.id);
+    const pythonPath =
+      "/home/kinetassan/assistant-comptable-python/bin/python";
 
     const scriptPath = path.join(
       process.cwd(),
@@ -136,110 +63,41 @@ export async function POST(request: Request) {
       stdout: string;
       stderr: string;
       code: number | null;
-      timedOut: boolean;
     }>((resolve) => {
-      const python = spawn(
-        PYTHON_PATH,
-        [scriptPath, filePath],
-        {
-          stdio: ["ignore", "pipe", "pipe"],
-        }
-      );
+      const python = spawn(pythonPath, [
+        scriptPath,
+        filePath,
+      ]);
 
       let stdout = "";
       let stderr = "";
-      let finished = false;
 
-      const timer = setTimeout(() => {
-        if (finished) return;
+      python.stdout.on("data", (data) => {
+        stdout += data.toString();
+      });
 
-        finished = true;
+      python.stderr.on("data", (data) => {
+        stderr += data.toString();
+      });
 
-        python.kill("SIGKILL");
+      python.on("close", (code) => {
+        resolve({
+          stdout,
+          stderr,
+          code,
+        });
+      });
+
+      python.on("error", (error) => {
+        stderr += error.message;
 
         resolve({
           stdout,
           stderr,
-          code: null,
-          timedOut: true,
+          code: 1,
         });
-      }, MAX_EXTRACTION_TIME);
-
-      python.stdout.on(
-        "data",
-        (data) => {
-          stdout += data.toString();
-        }
-      );
-
-      python.stderr.on(
-        "data",
-        (data) => {
-          stderr += data.toString();
-        }
-      );
-
-      python.on(
-        "close",
-        (code) => {
-          if (finished) return;
-
-          finished = true;
-          clearTimeout(timer);
-
-          resolve({
-            stdout,
-            stderr,
-            code,
-            timedOut: false,
-          });
-        }
-      );
-
-      python.on(
-        "error",
-        (error) => {
-          if (finished) return;
-
-          finished = true;
-          clearTimeout(timer);
-
-          stderr += error.message;
-
-          resolve({
-            stdout,
-            stderr,
-            code: 1,
-            timedOut: false,
-          });
-        }
-      );
+      });
     });
-
-    if (result.timedOut) {
-      console.error(
-        "TIMEOUT EXTRACTION :",
-        document.original_name
-      );
-
-      db.prepare(
-        `
-        UPDATE documents
-        SET status = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        `
-      ).run("error", document.id);
-
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "L'extraction a dépassé le temps maximum autorisé",
-        },
-        { status: 504 }
-      );
-    }
 
     if (result.code !== 0) {
       console.error(
@@ -247,37 +105,23 @@ export async function POST(request: Request) {
         result.stderr
       );
 
-      db.prepare(
-        `
+      db.prepare(`
         UPDATE documents
         SET status = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-        `
-      ).run("error", document.id);
+      `).run("error", document.id);
 
       return NextResponse.json(
         {
-          success: false,
-          error:
-            "Impossible de lire le document PDF",
+          error: "Impossible de lire le document",
+          details: result.stderr,
         },
         { status: 500 }
       );
     }
 
-    const extractedText =
-      result.stdout.trim();
-
-    /*
-     * Le script Python doit produire :
-     *
-     * --- PAGE 1 ---
-     * texte
-     *
-     * --- PAGE 2 ---
-     * texte
-     */
+    const extractedText = result.stdout;
 
     const pageRegex =
       /--- PAGE (\d+) ---([\s\S]*?)(?=--- PAGE \d+ ---|$)/g;
@@ -289,137 +133,108 @@ export async function POST(request: Request) {
 
     let match: RegExpExecArray | null;
 
-    while (
-      (match = pageRegex.exec(extractedText)) !== null
-    ) {
+    while ((match = pageRegex.exec(extractedText)) !== null) {
       const pageNumber = Number(match[1]);
       const text = match[2].trim();
 
-      if (
-        Number.isInteger(pageNumber) &&
-        pageNumber > 0 &&
-        text.length > 0
-      ) {
-        pages.push({
-          pageNumber,
-          text,
-        });
-      }
+      pages.push({
+        pageNumber,
+        text,
+      });
     }
 
     if (pages.length === 0) {
-      db.prepare(
-        `
+      db.prepare(`
         UPDATE documents
         SET status = ?,
             page_count = 0,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-        `
-      ).run("error", document.id);
+      `).run("error", document.id);
 
       return NextResponse.json(
         {
-          success: false,
           error:
-            "Aucune page exploitable n'a été trouvée dans le PDF",
+            "Aucune page exploitable n'a été trouvée dans le document.",
         },
         { status: 422 }
       );
     }
-
-    /*
-     * Sécurité supplémentaire :
-     * pas de doublons de pages.
-     */
-
-    const pageNumbers = pages.map(
-      (page) => page.pageNumber
-    );
-
-    if (
-      new Set(pageNumbers).size !==
-      pageNumbers.length
-    ) {
-      db.prepare(
-        `
-        UPDATE documents
-        SET status = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        `
-      ).run("error", document.id);
-
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "L'extraction PDF contient des pages dupliquées",
-        },
-        { status: 422 }
-      );
-    }
-
-    pages.sort(
-      (a, b) =>
-        a.pageNumber - b.pageNumber
-    );
-
-    /*
-     * On remplace les anciennes pages.
-     *
-     * Les chunks sont supprimés automatiquement
-     * grâce aux clés étrangères et à la suppression
-     * explicite des pages.
-     */
 
     const transaction = db.transaction(() => {
-      db.prepare(
-        `
-        DELETE FROM document_chunks
-        WHERE page_id IN (
-          SELECT id
-          FROM document_pages
-          WHERE document_id = ?
-        )
-        `
-      ).run(document.id);
-
-      db.prepare(
-        `
+      db.prepare(`
         DELETE FROM document_pages
         WHERE document_id = ?
-        `
-      ).run(document.id);
+      `).run(document.id);
 
-      const insertPage = db.prepare(
-        `
+      const insertPage = db.prepare(`
         INSERT INTO document_pages (
           document_id,
           page_number,
           text
         )
         VALUES (?, ?, ?)
-        `
-      );
+      `);
+
+      const insertChunk = db.prepare(`
+        INSERT INTO document_chunks (
+          page_id,
+          chunk_index,
+          text
+        )
+        VALUES (?, ?, ?)
+      `);
 
       for (const page of pages) {
-        insertPage.run(
+        const pageResult = insertPage.run(
           document.id,
           page.pageNumber,
           page.text
         );
+
+        const pageId = Number(pageResult.lastInsertRowid);
+
+        const chunkSize = 2500;
+        const overlap = 300;
+
+        let chunkIndex = 0;
+        let start = 0;
+
+        while (start < page.text.length) {
+          const end = Math.min(
+            start + chunkSize,
+            page.text.length
+          );
+
+          const chunkText = page.text
+            .slice(start, end)
+            .trim();
+
+          if (chunkText) {
+            insertChunk.run(
+              pageId,
+              chunkIndex,
+              chunkText
+            );
+
+            chunkIndex++;
+          }
+
+          if (end >= page.text.length) {
+            break;
+          }
+
+          start = end - overlap;
+        }
       }
 
-      db.prepare(
-        `
+      db.prepare(`
         UPDATE documents
         SET status = ?,
             page_count = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-        `
-      ).run(
+      `).run(
         "extracted",
         pages.length,
         document.id
@@ -434,10 +249,6 @@ export async function POST(request: Request) {
       fileName: document.file_name,
       pageCount: pages.length,
       status: "extracted",
-      pages: pages.map((page) => ({
-        pageNumber: page.pageNumber,
-        text: page.text,
-      })),
     });
   } catch (error) {
     console.error(
@@ -447,8 +258,11 @@ export async function POST(request: Request) {
 
     return NextResponse.json(
       {
-        success: false,
         error: "Erreur lors de l'extraction",
+        details:
+          error instanceof Error
+            ? error.message
+            : String(error),
       },
       { status: 500 }
     );

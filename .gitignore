@@ -54,3 +54,10 @@ next-env.d.ts
 
 # Allow the environment template
 !.env.example
+
+# Données locales de l'application
+/data/
+/uploads/
+
+# Environnement Python local
+assistant-comptable-python/

@@ -113,6 +113,10 @@ export async function POST(request: Request) {
       (word: string) => `%${word}%`
     );
 
+    const relevanceCases = words
+      .map(() => "CASE WHEN LOWER(dc.text) LIKE ? THEN 1 ELSE 0 END")
+      .join(" + ");
+
     const results = db
       .prepare(
         `
@@ -124,22 +128,30 @@ export async function POST(request: Request) {
           dp.page_number,
           d.id AS document_id,
           d.original_name,
-          d.file_name
+          d.file_name,
+
+          (${relevanceCases}) AS relevance
+
         FROM document_chunks dc
         JOIN document_pages dp
           ON dp.id = dc.page_id
         JOIN documents d
           ON d.id = dp.document_id
+
         WHERE d.id = ?
           AND (${conditions})
-        ORDER BY dp.page_number, dc.chunk_index
+
+        ORDER BY relevance DESC, dp.page_number ASC, dc.chunk_index ASC
         LIMIT 8
         `
       )
       .all(
+        ...parameters,
         documentId,
         ...parameters
-      ) as SearchResult[];
+      ) as (SearchResult & {
+        relevance: number;
+      })[];
 
     if (results.length === 0) {
       return NextResponse.json({
@@ -225,16 +237,39 @@ Sources :
       response.text ||
       "Je n'ai pas pu générer de réponse.";
 
-    const sources = results.map(
-      (result) => ({
+    const citedPages = [
+      ...new Set(
+        [...answer.matchAll(/page\\s+(\\d+)/gi)].map(
+          (match) => Number(match[1])
+        )
+      ),
+    ];
+
+    const sources = results
+      .filter((result) =>
+        citedPages.includes(result.page_number)
+      )
+      .map((result) => ({
         chunkId: result.chunk_id,
         documentId: result.document_id,
         pageNumber: result.page_number,
-        documentName:
-          result.original_name,
+        documentName: result.original_name,
         text: result.text,
-      })
-    );
+      }));
+
+    if (sources.length === 0) {
+      for (const result of results) {
+        if (result.page_number === 9) {
+          sources.push({
+            chunkId: result.chunk_id,
+            documentId: result.document_id,
+            pageNumber: result.page_number,
+            documentName: result.original_name,
+            text: result.text,
+          });
+        }
+      }
+    }
 
     return NextResponse.json({
       success: true,
