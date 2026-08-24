@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
-import { spawn } from "child_process";
+import fs from "fs/promises";
 import path from "path";
 import db from "@/lib/db";
+import { PDFParse } from "pdf-parse";
+
+export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
@@ -50,100 +53,28 @@ export async function POST(request: Request) {
       path.basename(document.file_path)
     );
 
-    const pythonPath =
-      "/home/kinetassan/assistant-comptable-python/bin/python";
+    const buffer = await fs.readFile(filePath);
 
-    const scriptPath = path.join(
-      process.cwd(),
-      "scripts",
-      "read_one_pdf.py"
-    );
-
-    const result = await new Promise<{
-      stdout: string;
-      stderr: string;
-      code: number | null;
-    }>((resolve) => {
-      const python = spawn(pythonPath, [
-        scriptPath,
-        filePath,
-      ]);
-
-      let stdout = "";
-      let stderr = "";
-
-      python.stdout.on("data", (data) => {
-        stdout += data.toString();
-      });
-
-      python.stderr.on("data", (data) => {
-        stderr += data.toString();
-      });
-
-      python.on("close", (code) => {
-        resolve({
-          stdout,
-          stderr,
-          code,
-        });
-      });
-
-      python.on("error", (error) => {
-        stderr += error.message;
-
-        resolve({
-          stdout,
-          stderr,
-          code: 1,
-        });
-      });
-    });
-
-    if (result.code !== 0) {
-      console.error(
-        "ERREUR EXTRACTION PYTHON :",
-        result.stderr
-      );
-
-      db.prepare(`
-        UPDATE documents
-        SET status = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run("error", document.id);
-
-      return NextResponse.json(
-        {
-          error: "Impossible de lire le document",
-          details: result.stderr,
-        },
-        { status: 500 }
-      );
-    }
-
-    const extractedText = result.stdout;
+    const parser = new PDFParse({ data: buffer });
+const parsed = await parser.getText();
+const info = await parser.getInfo();
+    const extractedText = parsed.text || "";
+const pageCount = info.total || 0;
 
     const pageRegex =
       /--- PAGE (\d+) ---([\s\S]*?)(?=--- PAGE \d+ ---|$)/g;
 
-    const pages: {
-      pageNumber: number;
-      text: string;
-    }[] = [];
+    /*
+     * pdf-parse ne fournit pas ici les séparateurs de pages
+     * comme notre script Python.
+     *
+     * On reconstruit donc les pages à partir du nombre
+     * de pages du PDF et du texte extrait.
+     */
 
-    let match: RegExpExecArray | null;
+    
 
-    while ((match = pageRegex.exec(extractedText)) !== null) {
-      const pageNumber = Number(match[1]);
-      const text = match[2].trim();
-
-      pages.push({
-        pageNumber,
-        text,
-      });
-    }
-
-    if (pages.length === 0) {
+    if (!extractedText.trim() || pageCount === 0) {
       db.prepare(`
         UPDATE documents
         SET status = ?,
@@ -160,6 +91,21 @@ export async function POST(request: Request) {
         { status: 422 }
       );
     }
+
+    /*
+     * Pour cette première version, on conserve tout le texte
+     * sur la première page logique.
+     *
+     * On améliorera ensuite la séparation page par page
+     * si les citations doivent être précises.
+     */
+
+    const pages = [
+      {
+        pageNumber: 1,
+        text: extractedText.trim(),
+      },
+    ];
 
     const transaction = db.transaction(() => {
       db.prepare(`
@@ -236,7 +182,7 @@ export async function POST(request: Request) {
         WHERE id = ?
       `).run(
         "extracted",
-        pages.length,
+        pageCount,
         document.id
       );
     });
@@ -247,7 +193,7 @@ export async function POST(request: Request) {
       success: true,
       documentId: document.id,
       fileName: document.file_name,
-      pageCount: pages.length,
+      pageCount,
       status: "extracted",
     });
   } catch (error) {
