@@ -1,23 +1,28 @@
 import { NextResponse } from "next/server";
-import db from "@/lib/db";
+import { supabase } from "@/lib/supabase";
 
 export async function GET() {
   try {
-    const clients = db
-      .prepare(`
-        SELECT
-          id,
-          name,
-          created_at,
-          updated_at
-        FROM clients
-        ORDER BY name ASC
-      `)
-      .all();
+    const { data: clients, error } = await supabase
+      .from("clients")
+      .select("id, name, created_at, updated_at")
+      .order("name", { ascending: true });
+
+    if (error) {
+      console.error("ERREUR GET CLIENTS :", error);
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Impossible de récupérer les clients",
+        },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({
       success: true,
-      clients,
+      clients: clients ?? [],
     });
   } catch (error) {
     console.error("ERREUR GET CLIENTS :", error);
@@ -51,24 +56,23 @@ export async function POST(request: Request) {
       );
     }
 
-    const result = db
-      .prepare(`
-        INSERT INTO clients (name)
-        VALUES (?)
-      `)
-      .run(name);
+    const { data: client, error } = await supabase
+      .from("clients")
+      .insert({ name })
+      .select("id, name, created_at, updated_at")
+      .single();
 
-    const client = db
-      .prepare(`
-        SELECT
-          id,
-          name,
-          created_at,
-          updated_at
-        FROM clients
-        WHERE id = ?
-      `)
-      .get(result.lastInsertRowid);
+    if (error) {
+      console.error("ERREUR POST CLIENT :", error);
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Impossible de créer le client",
+        },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json(
       {
